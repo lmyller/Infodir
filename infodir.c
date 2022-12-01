@@ -29,6 +29,7 @@ void process(Infodir *infodir){
 void createProcess(const unsigned char type, Infodir *infodir)
 {
     pid_t pid = fork();
+    
 
     if (pid != 0){
         printf("Pid filho: %d\n", getpid());
