@@ -8,21 +8,27 @@ int infodir(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    infodirProcess(argv[1]);
+    infodirThread(argv[1]);
+
+    return EXIT_SUCCESS;
+}
+
+void infodirProcess(const char *argv)
+{
     Infodir *infodir;
     time_t timeStart, timeFinish;
     int duration;
-    char strTimeStart[9], strTimeFinish[9];
+    char strTimeStart[SIZE_TIME], strTimeFinish[SIZE_TIME];
     int segmentId = createSharedMemory();
 
     infodir = attachedSegmentMemory(segmentId);
 
-    infodir->directories = 0;
-    infodir->files = 0;
-    infodir->sizeDirectory = 0;
+    clearInfodir(infodir);
 
     timeStart = getCurrentTime();
 
-    readRootDir(argv[1], segmentId);
+    readRootDir(argv, segmentId, IPC);
 
     timeFinish = getCurrentTime();
 
@@ -31,23 +37,52 @@ int infodir(int argc, char *argv[])
     convertTimeToStr(timeStart, strTimeStart);
     convertTimeToStr(timeFinish, strTimeFinish);
 
-    showReport(argv[1], infodir, strTimeStart, strTimeFinish, duration, IPC);
+    showReport(argv, infodir, strTimeStart, strTimeFinish, duration, IPC);
 
     desconnectSharedMemory(infodir);
-
-    return EXIT_SUCCESS;
 }
 
-pid_t createProcess()
+void infodirThread(const char *argv)
 {
-    return fork();
+    Infodir *infodir;
+    time_t timeStart, timeFinish;
+    int duration;
+    char strTimeStart[SIZE_TIME], strTimeFinish[SIZE_TIME];
+    int segmentId = createSharedMemory();
+
+    infodir = attachedSegmentMemory(segmentId);
+
+    clearInfodir(infodir);
+
+    timeStart = getCurrentTime();
+
+    readRootDir(argv, segmentId, MULTITHREAD);
+
+    timeFinish = getCurrentTime();
+
+    duration = getDuration(timeStart, timeFinish);
+
+    convertTimeToStr(timeStart, strTimeStart);
+    convertTimeToStr(timeFinish, strTimeFinish);
+
+    showReport(argv, infodir, strTimeStart, strTimeFinish, duration, MULTITHREAD);
+
+    desconnectSharedMemory(infodir);
 }
 
-void readRootDir(const char *arg, int segmentId)
+void clearInfodir(Infodir *infodir)
+{
+    infodir->directories = 0;
+    infodir->files = 0;
+    infodir->sizeDirectory = 0;
+}
+
+void readRootDir(const char *arg, int segmentId, const char *method)
 {
     DIR *dir;
     struct dirent *dirent;
     char path[SIZE_PATH], fullPath[SIZE_PATH];
+    int countFile = 0;
 
     strcpy(path, arg);
     dir = opendir(path);
@@ -60,32 +95,28 @@ void readRootDir(const char *arg, int segmentId)
             {
                 if (dirent->d_type == DT_DIR)
                 {
-                    pid_t pid = createProcess();
-
                     concatPath(path, fullPath, dirent->d_name);
 
-                    if (pid == 0)
-                    {
-                        childProcess(dirent->d_type, segmentId, fullPath);
-                        readSubDir(fullPath, segmentId);
-                    }
+                    Arguments arguments;
+
+                    strcpy(arguments.path, fullPath);
+                    arguments.segmentId = segmentId;
+
+                    if (strcmp(method, IPC) == 0)
+                        process(arguments, dirent->d_type);
 
                     else
-                    {
-                        wait(0);
-                        exit(EXIT_SUCCESS);
-                    }
+                        thread(arguments);
                 }
 
-                /*else if (dirent->d_type == DT_REG)
-                {
-                    pid_t pid = createProcess(){
-
-                    }
-                }*/
+                else if (dirent->d_type == DT_REG)
+                    countFile++;
             }
         }
         closedir(dir);
+
+        if (countFile > 0)
+            readRootFiles(segmentId, arg);
     }
 
     else
@@ -95,13 +126,14 @@ void readRootDir(const char *arg, int segmentId)
     }
 }
 
-void readSubDir(const char *arg, int segmentId)
+int readSubDir(void *args)
 {
+    Arguments arguments = *(Arguments *)args;
     DIR *dir;
     struct dirent *dirent;
     char path[SIZE_PATH], fullPath[SIZE_PATH];
 
-    strcpy(path, arg);
+    strcpy(path, arguments.path);
     dir = opendir(path);
 
     if (dir)
@@ -111,17 +143,62 @@ void readSubDir(const char *arg, int segmentId)
             if ((strcmp(dirent->d_name, ".") != 0 && strcmp(dirent->d_name, "..") != 0))
             {
                 concatPath(path, fullPath, dirent->d_name);
-                childProcess(dirent->d_type, segmentId, fullPath);
+                strcpy(arguments.path, fullPath);
+                childProcess(dirent->d_type, arguments.segmentId, arguments.path);
 
                 if (dirent->d_type == DT_DIR)
-                    readSubDir(fullPath, segmentId);
+                    readSubDir(&arguments);
             }
         }
         closedir(dir);
     }
 }
 
-void childProcess(const unsigned char type, int segmentId, char *fullPath)
+void process(Arguments arguments, const unsigned char type)
+{
+    pid_t pid = createProcess();
+
+    if (pid == 0)
+    {
+        if (type == DT_DIR)
+            childProcess(type, arguments.segmentId, arguments.path);
+
+        readSubDir(&arguments);
+        exit(EXIT_SUCCESS);
+    }
+
+    else
+        wait(0);
+}
+
+void readRootFiles(const int segmentId, const char *path)
+{
+    pid_t pid = createProcess();
+
+    if(pid == 0){
+
+        DIR *dir;
+        struct dirent *dirent;
+        char fullPath[SIZE_PATH];
+
+        dir = opendir(path);
+
+        while ((dirent = readdir(dir)) != NULL)
+        {
+            if(dirent->d_type == DT_REG){
+                concatPath(path, fullPath, dirent->d_name);
+                childProcess(dirent->d_type, segmentId, fullPath);
+            }
+        }
+
+        exit(EXIT_SUCCESS);
+    }
+
+    else
+        wait(0);
+}
+
+void childProcess(const unsigned char type, const int segmentId, const char *fullPath)
 {
     Infodir *infodir;
 
@@ -139,7 +216,27 @@ void childProcess(const unsigned char type, int segmentId, char *fullPath)
     desconnectSharedMemory(infodir);
 }
 
-long getSizeFile(char *pathFile)
+pid_t createProcess()
+{
+    return fork();
+}
+
+void thread(Arguments arguments)
+{
+    thrd_t threadId = threadChild(arguments);
+    printf("%s\n", "Thread");
+    thrd_join(threadId, NULL);
+}
+
+pthread_t threadChild(Arguments arguments)
+{
+    thrd_t threadId;
+    printf("%s\n", "Thread filha");
+    int status = thrd_create(&threadId, readSubDir, &arguments);
+    return (status == thrd_success) ? threadId : status;
+}
+
+long getSizeFile(const char *pathFile)
 {
     FILE *file = openFile(pathFile);
 
@@ -149,11 +246,11 @@ long getSizeFile(char *pathFile)
 
         return ftell(file);
     }
-    
+
     return 0;
 }
 
-FILE *openFile(char *pathFile)
+FILE *openFile(const char *pathFile)
 {
     return fopen(pathFile, "rb");
 }
@@ -188,8 +285,7 @@ void cleanString(char *str, const unsigned int sizeString)
 }
 
 // Exibe o relatório na tela da quantidade de diretórios e arquivos pesquisados e o tempo de pesquisa
-void showReport(char *path, Infodir *infodir, char *timeStart, char *timeFinish, int duration,
-                const char *method)
+void showReport(const char *path, const Infodir *infodir, const char *timeStart, const char *timeFinish, const int duration, const char *method)
 {
     printf("\n%s %s", METHOD, method);
     printf("\n%s%s\n", DIRECTORY, path);
@@ -197,10 +293,10 @@ void showReport(char *path, Infodir *infodir, char *timeStart, char *timeFinish,
     printf("\n%s %d", FILES, infodir->files);
     printf("\n%s %d", SUB_DIRECTORIES, infodir->directories);
     printf("\n%s %ld\n", SIZE_DIRECTORY, infodir->sizeDirectory);
-    printf("\n%s", IPC_TIME);
+    printf("\n%s%s", TIME, method);
     printf("\n%s%s", START, timeStart);
     printf("\n%s%s", FINISH, timeFinish);
-    printf("\n%s%d%s\n", DURATION, duration, SEGUNDOS);
+    printf("\n%s%d%s\n\n", DURATION, duration, SEGUNDOS);
 }
 
 // Converte a hora em time_t para string
